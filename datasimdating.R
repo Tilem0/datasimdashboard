@@ -193,7 +193,7 @@ plot_simple_slopes_grouped <- function(data_wide) {
     scale_shape_manual(values = c("LZO hoch (+1SD)" = 16, "LZO niedrig (-1SD)" = 17)) +
     dark_theme() +
     theme(legend.position = "bottom") +
-    labs(title = "Simple Slopes: Moderation durch LZO (H3)", 
+    labs(title = "Simple Slopes: Moderation durch LZO", 
          subtitle = "Divergierende Linien = LZO moderiert den Valenz-Effekt",
          y = "CSIM", color = "Valenz", linetype = "LZO-Gruppe", shape = "LZO-Gruppe")
 }
@@ -270,7 +270,7 @@ plot_lzo_distribution <- function(data_wide) {
     geom_density(alpha = 0.6) +
     scale_fill_manual(values = c("realistisch" = "#4169E1", "invertiert" = "#FF8C00")) +
     dark_theme() +
-    labs(title = "LZO-Verteilung nach Ökologie (Randomisierungscheck)", 
+    labs(title = "LZO-Verteilung nach Ökologie", 
          subtitle = "Gute Überlappung = erfolgreiche Randomisierung",
          x = "Langzeitorientierung (z-standardisiert)", fill = "Ökologie")
 }
@@ -863,5 +863,6 @@ server <- function(input, output, session) {
     }
   )
 }
+
 
 shinyApp(ui = ui, server = server)
