@@ -1,2 +1,2 @@
 # datasimdashboard
-datasimulation 4 my st00pid study
+datasimulation 4 my study
