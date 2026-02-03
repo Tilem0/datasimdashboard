@@ -91,20 +91,126 @@ simulate_study_data <- function(n_per_group = 100, scenario = "expected", custom
   lzo <- rnorm(n_total, mean = 0, sd = 1)
   kzo <- scale(rnorm(n_total, mean = 0, sd = 1) + 0.2 * lzo)[,1]
   
-  data <- data.frame(subject_id = subject_id, ecology = ecology, lzo = lzo, kzo = kzo)
+  subjects <- data.frame(subject_id = subject_id, ecology = ecology, lzo = lzo, kzo = kzo)
   
-  data$csim_trustworthy <- ifelse(data$ecology == "realistisch",
-                                  base_trust_realistic + 0.03 * data$lzo + rnorm(n_total, 0, 0.08),
-                                  base_trust_inverted + lzo_slope_inverted * data$lzo + rnorm(n_total, 0, 0.08))
+  n_old <- 24
+  n_new <- 24
+  n_trust_real <- round(n_old * 0.7)
+  n_cheat_real <- n_old - n_trust_real
+  n_trust_inv <- round(n_old * 0.3)
+  n_cheat_inv <- n_old - n_trust_inv
   
-  data$csim_cheater <- ifelse(data$ecology == "realistisch",
-                              base_cheater_realistic + lzo_slope_realistic * data$lzo + rnorm(n_total, 0, 0.08),
-                              base_cheater_inverted + 0.02 * data$lzo + rnorm(n_total, 0, 0.08))
+  simulate_subject_trials <- function(subject_row) {
+    subject_ecology <- subject_row$ecology
+    subject_lzo <- subject_row$lzo
+    
+    if (subject_ecology == "realistisch") {
+      n_trust <- n_trust_real
+      n_cheat <- n_cheat_real
+      hit_trust <- 0.78
+      hit_cheat <- 0.82
+      base_trust <- base_trust_realistic
+      base_cheat <- base_cheater_realistic
+      lzo_slope_trust <- 0.03
+      lzo_slope_cheat <- lzo_slope_realistic
+    } else {
+      n_trust <- n_trust_inv
+      n_cheat <- n_cheat_inv
+      hit_trust <- 0.80
+      hit_cheat <- 0.76
+      base_trust <- base_trust_inverted
+      base_cheat <- base_cheater_inverted
+      lzo_slope_trust <- lzo_slope_inverted
+      lzo_slope_cheat <- 0.02
+    }
+    
+    old_valence <- c(rep("vertrauenswürdig", n_trust), rep("betrügerisch", n_cheat))
+    new_valence <- rep(c("vertrauenswürdig", "betrügerisch"), each = n_new / 2)
+    
+    old_items <- data.frame(
+      item_id = seq_len(n_old),
+      item_type = "alt",
+      valence = old_valence
+    )
+    new_items <- data.frame(
+      item_id = seq_len(n_new),
+      item_type = "neu",
+      valence = new_valence
+    )
+    
+    items <- bind_rows(old_items, new_items)
+    
+    items$hit_prob <- ifelse(items$item_type == "alt" & items$valence == "vertrauenswürdig", hit_trust,
+                             ifelse(items$item_type == "alt" & items$valence == "betrügerisch", hit_cheat, 0.20))
+    
+    items$recognized_old <- rbinom(nrow(items), 1, items$hit_prob) == 1
+    
+    source_prob <- ifelse(items$valence == "vertrauenswürdig",
+                          base_trust + lzo_slope_trust * subject_lzo,
+                          base_cheat + lzo_slope_cheat * subject_lzo)
+    
+    source_prob <- pmin(pmax(source_prob, 0.3), 0.98)
+    dk_prob <- pmin(pmax(0.25 - 0.03 * abs(subject_lzo), 0.05), 0.4)
+    wrong_prob <- pmax(1 - source_prob - dk_prob, 0.02)
+    total_prob <- source_prob + dk_prob + wrong_prob
+    
+    source_prob <- source_prob / total_prob
+    dk_prob <- dk_prob / total_prob
+    wrong_prob <- wrong_prob / total_prob
+    
+    source_response <- rep(NA_character_, nrow(items))
+    source_correct <- rep(NA, nrow(items))
+    
+    for (i in seq_len(nrow(items))) {
+      if (items$item_type[i] == "alt" && items$recognized_old[i]) {
+        draw <- sample(c("correct", "wrong", "weiss_nicht"), size = 1,
+                       prob = c(source_prob[i], wrong_prob[i], dk_prob[i]))
+        if (draw == "correct") {
+          source_response[i] <- items$valence[i]
+          source_correct[i] <- 1
+        } else if (draw == "wrong") {
+          source_response[i] <- ifelse(items$valence[i] == "vertrauenswürdig", "betrügerisch", "vertrauenswürdig")
+          source_correct[i] <- 0
+        } else {
+          source_response[i] <- "weiß nicht"
+          source_correct[i] <- 0
+        }
+      }
+    }
+    
+    items$source_response <- source_response
+    items$source_correct <- source_correct
+    
+    items
+  }
   
-  data$csim_trustworthy <- pmin(pmax(data$csim_trustworthy, 0.3), 1.0)
-  data$csim_cheater <- pmin(pmax(data$csim_cheater, 0.3), 1.0)
+  trial_data <- subjects %>%
+    rowwise() %>%
+    mutate(trials = list(simulate_subject_trials(cur_data()))) %>%
+    unnest(cols = c(trials)) %>%
+    ungroup() %>%
+    mutate(
+      ecology = factor(ecology, levels = c("realistisch", "invertiert")),
+      valence = factor(valence, levels = c("vertrauenswürdig", "betrügerisch")),
+      item_type = factor(item_type, levels = c("alt", "neu"))
+    )
   
-  data_long <- data %>%
+  csim_summary <- trial_data %>%
+    filter(item_type == "alt", recognized_old) %>%
+    group_by(subject_id, ecology, lzo, kzo, valence) %>%
+    summarise(csim = mean(source_correct, na.rm = TRUE), hits = n(), .groups = "drop")
+  
+  data_wide <- csim_summary %>%
+    pivot_wider(names_from = valence, values_from = csim, names_prefix = "csim_") %>%
+    rename(csim_trustworthy = csim_vertrauenswürdig, csim_cheater = csim_betrügerisch)
+  
+  data_wide <- data_wide %>%
+    mutate(
+      csim_trustworthy = replace_na(csim_trustworthy, 0),
+      csim_cheater = replace_na(csim_cheater, 0)
+    )
+  
+  data_long <- data_wide %>%
     pivot_longer(cols = c(csim_trustworthy, csim_cheater), names_to = "valence", values_to = "csim") %>%
     mutate(valence = ifelse(valence == "csim_trustworthy", "vertrauenswürdig", "betrügerisch"),
            valence = factor(valence, levels = c("vertrauenswürdig", "betrügerisch")),
@@ -116,7 +222,7 @@ simulate_study_data <- function(n_per_group = 100, scenario = "expected", custom
     lzo_slope_realistic = lzo_slope_realistic, lzo_slope_inverted = lzo_slope_inverted
   )
   
-  return(list(wide = data, long = data_long, params = params))
+  return(list(wide = data_wide, long = data_long, trials = trial_data, params = params))
 }
 
 # ============================================================================
@@ -139,15 +245,30 @@ dark_theme <- function() {
     )
 }
 
+summarise_error <- function(data, error_type = "ci") {
+  data %>%
+    group_by(ecology, valence) %>%
+    summarise(
+      m = mean(csim),
+      sd = sd(csim),
+      se = sd(csim) / sqrt(n()),
+      n = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      t_crit = qt(0.975, df = pmax(n - 1, 1)),
+      ci = se * t_crit,
+      err = ifelse(error_type == "se", se, ci)
+    )
+}
+
 # Balkendiagramm
-plot_interaction_bar <- function(data_long) {
-  sum_data <- data_long %>% 
-    group_by(ecology, valence) %>% 
-    summarise(m = mean(csim), se = sd(csim)/sqrt(n()), .groups = "drop")
+plot_interaction_bar <- function(data_long, error_type = "ci") {
+  sum_data <- summarise_error(data_long, error_type)
   
   ggplot(sum_data, aes(x = ecology, y = m, fill = valence)) +
     geom_bar(stat = "identity", position = position_dodge(0.8), width = 0.7) +
-    geom_errorbar(aes(ymin = m - se, ymax = m + se), position = position_dodge(0.8), width = 0.25) +
+    geom_errorbar(aes(ymin = m - err, ymax = m + err), position = position_dodge(0.8), width = 0.25) +
     scale_fill_manual(values = c("vertrauenswürdig" = "#40E0D0", "betrügerisch" = "#DC143C")) +
     dark_theme() +
     theme(legend.position = "bottom") +
@@ -156,15 +277,13 @@ plot_interaction_bar <- function(data_long) {
 }
 
 # Liniendiagramm
-plot_interaction_line <- function(data_long) {
-  sum_data <- data_long %>% 
-    group_by(ecology, valence) %>% 
-    summarise(m = mean(csim), se = sd(csim)/sqrt(n()), .groups = "drop")
+plot_interaction_line <- function(data_long, error_type = "ci") {
+  sum_data <- summarise_error(data_long, error_type)
   
   ggplot(sum_data, aes(x = ecology, y = m, color = valence, group = valence)) +
     geom_line(size = 1.5) +
     geom_point(size = 4) +
-    geom_errorbar(aes(ymin = m - se, ymax = m + se), width = 0.1, size = 1) +
+    geom_errorbar(aes(ymin = m - err, ymax = m + err), width = 0.1, size = 1) +
     scale_color_manual(values = c("vertrauenswürdig" = "#40E0D0", "betrügerisch" = "#DC143C")) +
     dark_theme() +
     theme(legend.position = "bottom") +
@@ -278,6 +397,7 @@ ui <- dashboardPage(
       menuItem("Deskriptiv", tabName = "descriptive", icon = icon("chart-area")),
       menuItem("Statistik", tabName = "statistics", icon = icon("table")),
       menuItem("LMM & Kontraste", tabName = "lmm_results", icon = icon("calculator")),
+      menuItem("Model Diagnostics", tabName = "model_diagnostics", icon = icon("stethoscope")),
       menuItem("Export", tabName = "export", icon = icon("download"))
        ),
     
@@ -287,6 +407,8 @@ ui <- dashboardPage(
         selectInput("scenario", "Szenario:", 
                     choices = c("Erwartet" = "expected", "Null" = "null", "Nur H1" = "partial_h1_only", 
                                 "Starke Moderation" = "strong_moderation", "Deckeneffekt" = "ceiling_effect", "Custom" = "custom")),
+        selectInput("error_type", "Fehlerbalken:", choices = c("95% CI" = "ci", "SE" = "se"), selected = "ci"),
+        checkboxInput("median_split", "Median-Split (Didaktik)", value = FALSE),
         
         conditionalPanel("input.scenario == 'custom'",
                          div(style = "background:#3c3c3c;padding:10px;border-radius:5px;margin-bottom:10px;",
@@ -366,6 +488,9 @@ ui <- dashboardPage(
                 box(width = 12, title = "Rohdaten (Wide Format)", DTOutput("raw_data"))
               ),
               fluidRow(
+                box(width = 12, title = "Trial-Daten (Stichprobe)", DTOutput("trial_data"))
+              ),
+              fluidRow(
                 box(width = 6, title = "Datenstruktur", verbatimTextOutput("structure")),
                 box(width = 6, title = "Simulationsparameter", tableOutput("params"))
               )
@@ -384,20 +509,29 @@ ui <- dashboardPage(
               ),
               fluidRow(
                 box(width = 6, title = "Mittelwerte", tableOutput("inter_means")),
-                box(width = 6, title = "Effektgrößen (Cohen's d)", verbatimTextOutput("eff_sizes"))
+                box(width = 6, title = "Effektgrößen (paired d_z)", verbatimTextOutput("eff_sizes"))
               )
       ),
       
       # ===== SIMPLE SLOPES =====
       tabItem(tabName = "simple_slopes",
               fluidRow(
-                box(width = 12, title = "Simple Slopes: Median-Split", 
-                    plotOutput("ss_plot_grouped", height = "400px"),
-                    div(class = "interpretation-box",
-                        p(strong("Was zeigt der Graph:"), "Vergleich des Valenz-Effekts für Personen mit hoher vs. niedriger LZO (Median-Split). Divergierende Linien bedeuten Moderation."),
-                        p(strong("Erwartet:"), "Realistisch: Bei hoher LZO ist der Cheater-Vorteil größer (steilere Linie). Invertiert: Bei hoher LZO ist der Trustworthy-Vorteil größer."),
-                        p(strong("Nur H1:"), "Linien verlaufen weitgehend parallel - LZO hat kaum Einfluss.")
-                    ))
+                conditionalPanel(
+                  condition = "input.median_split",
+                  box(width = 12, title = "Simple Slopes: Median-Split (Didaktik)", 
+                      plotOutput("ss_plot_grouped", height = "400px"),
+                      div(class = "interpretation-box",
+                          p(strong("Was zeigt der Graph:"), "Vergleich des Valenz-Effekts für Personen mit hoher vs. niedriger LZO (Median-Split). Divergierende Linien bedeuten Moderation."),
+                          p(strong("Erwartet:"), "Realistisch: Bei hoher LZO ist der Cheater-Vorteil größer (steilere Linie). Invertiert: Bei hoher LZO ist der Trustworthy-Vorteil größer."),
+                          p(strong("Nur H1:"), "Linien verlaufen weitgehend parallel - LZO hat kaum Einfluss.")
+                      ))
+                ),
+                conditionalPanel(
+                  condition = "!input.median_split",
+                  box(width = 12, title = "Median-Split ausgeschaltet",
+                      div(class = "interpretation-box",
+                          p("Der Median-Split ist optional für didaktische Zwecke. Aktivieren Sie ihn in der Sidebar, falls Sie die gruppierte Darstellung sehen möchten.")))
+                )
               ),
               fluidRow(
                 box(width = 6, title = "Scatter: Kontinuierliche LZO", 
@@ -441,6 +575,9 @@ ui <- dashboardPage(
               ),
               fluidRow(
                 box(width = 12, title = "Korrelationen", DTOutput("cor_table"))
+              ),
+              fluidRow(
+                box(width = 12, title = "Trial-Level GLMM: Source Accuracy (Hits)", DTOutput("glmm_coef"))
               )
       ),
       
@@ -495,6 +632,18 @@ ui <- dashboardPage(
                         ),
                         p(class = "hyp-note", "Berechnet als Effekt von LZO auf die Differenz CSIM(Cheater) - CSIM(Trust) pro Ökologie.")
                     ))
+              )
+      ),
+      
+      # ===== MODEL DIAGNOSTICS =====
+      tabItem(tabName = "model_diagnostics",
+              fluidRow(
+                box(width = 6, title = "Residuals vs Fitted", plotOutput("diag_resid_fitted", height = "350px")),
+                box(width = 6, title = "Q-Q Plot (Residuals)", plotOutput("diag_qq", height = "350px"))
+              ),
+              fluidRow(
+                box(width = 6, title = "Scale-Location", plotOutput("diag_scale_location", height = "350px")),
+                box(width = 6, title = "Diagnostics Summary", tableOutput("diag_summary"))
               )
       ),
       
@@ -599,11 +748,31 @@ server <- function(input, output, session) {
       lmer(csim ~ ecology * valence * scale(lzo) + ecology * valence * scale(kzo) + (1|subject_id), data = data)
     })
   })
+
+  glmm_model <- reactive({
+    req(study_data())
+    data <- study_data()$trials %>%
+      filter(item_type == "alt", recognized_old) %>%
+      mutate(subject_id = factor(subject_id))
+    
+    tryCatch({
+      glmer(source_correct ~ ecology * valence * scale(lzo) + ecology * valence * scale(kzo) + (1 | subject_id),
+            data = data, family = binomial, control = glmerControl(optimizer = "bobyqa"))
+    }, error = function(e) {
+      glmer(source_correct ~ ecology * valence * scale(lzo) + (1 | subject_id),
+            data = data, family = binomial, control = glmerControl(optimizer = "bobyqa"))
+    })
+  })
   
   # ===== TAB 2: DATEN =====
   output$raw_data <- renderDT({
     req(study_data())
     datatable(study_data()$wide, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
+  })
+
+  output$trial_data <- renderDT({
+    req(study_data())
+    datatable(head(study_data()$trials, 200), options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
   })
   
   output$structure <- renderPrint({
@@ -613,6 +782,8 @@ server <- function(input, output, session) {
     cat("Variablen:", ncol(study_data()$wide), "\n\n")
     cat("LONG FORMAT\n")
     cat("Beobachtungen:", nrow(study_data()$long), "\n")
+    cat("\nTRIAL FORMAT\n")
+    cat("Beobachtungen:", nrow(study_data()$trials), "\n")
   })
   
   output$params <- renderTable({
@@ -628,37 +799,48 @@ server <- function(input, output, session) {
   # ===== TAB 3: INTERAKTION =====
   output$inter_plot_bar <- renderPlot({
     req(study_data())
-    plot_interaction_bar(study_data()$long)
+    plot_interaction_bar(study_data()$long, input$error_type)
   })
   
   output$inter_plot_line <- renderPlot({
     req(study_data())
-    plot_interaction_line(study_data()$long)
+    plot_interaction_line(study_data()$long, input$error_type)
   })
   
   output$inter_means <- renderTable({
     req(study_data())
-    study_data()$long %>% 
-      group_by(ecology, valence) %>% 
-      summarise(M = round(mean(csim), 3), SD = round(sd(csim), 3), .groups = "drop")
+    summary_table <- summarise_error(study_data()$long, input$error_type)
+    summary_table %>%
+      mutate(
+        M = round(m, 3),
+        SD = round(sd, 3),
+        CI = round(ci, 3),
+        SE = round(se, 3)
+      ) %>%
+      select(ecology, valence, M, SE, CI)
   })
   
   output$eff_sizes <- renderPrint({
     req(study_data())
     d <- study_data()$wide
-    d1 <- (mean(d$csim_cheater[d$ecology == "realistisch"]) - mean(d$csim_trustworthy[d$ecology == "realistisch"])) / 
-      sqrt((var(d$csim_cheater[d$ecology == "realistisch"]) + var(d$csim_trustworthy[d$ecology == "realistisch"])) / 2)
-    d2 <- (mean(d$csim_trustworthy[d$ecology == "invertiert"]) - mean(d$csim_cheater[d$ecology == "invertiert"])) / 
-      sqrt((var(d$csim_trustworthy[d$ecology == "invertiert"]) + var(d$csim_cheater[d$ecology == "invertiert"])) / 2)
-    cat("H1 (Cheater - Trust | Realistisch): d =", round(d1, 2), "\n")
-    cat("H2 (Trust - Cheater | Invertiert): d =", round(d2, 2), "\n")
-    cat("\nd = 0.2 klein | 0.5 mittel | 0.8 groß")
+    d_real <- d %>% filter(ecology == "realistisch") %>%
+      mutate(diff = csim_cheater - csim_trustworthy)
+    d_inv <- d %>% filter(ecology == "invertiert") %>%
+      mutate(diff = csim_trustworthy - csim_cheater)
+    
+    d1 <- mean(d_real$diff) / sd(d_real$diff)
+    d2 <- mean(d_inv$diff) / sd(d_inv$diff)
+    cat("H1 (Cheater - Trust | Realistisch): d_z =", round(d1, 2), "\n")
+    cat("H2 (Trust - Cheater | Invertiert): d_z =", round(d2, 2), "\n")
+    cat("\nd_z = 0.2 klein | 0.5 mittel | 0.8 groß (paired)")
   })
   
   # ===== TAB 4: SIMPLE SLOPES =====
   output$ss_plot_grouped <- renderPlot({
     req(study_data())
-    plot_simple_slopes_grouped(study_data()$wide)
+    if (isTRUE(input$median_split)) {
+      plot_simple_slopes_grouped(study_data()$wide)
+    }
   })
   
   output$ss_plot_scatter <- renderPlot({
@@ -738,6 +920,28 @@ server <- function(input, output, session) {
     colnames(meltM) <- c("Var1", "Var2", "r")
     datatable(meltM, rownames = FALSE, options = list(pageLength = 16, searching = FALSE))
   })
+
+  output$glmm_coef <- renderDT({
+    req(study_data())
+    model <- glmm_model()
+    sum <- summary(model)
+    coef_df <- as.data.frame(sum$coefficients)
+    coef_df$Term <- rownames(coef_df)
+    colnames(coef_df) <- c("Estimate", "SE", "z", "p", "Term")
+    
+    coef_df$Term <- gsub("ecologyinvertiert", "ecology", coef_df$Term)
+    coef_df$Term <- gsub("valencebetrügerisch", "valence", coef_df$Term)
+    coef_df$Term <- gsub("scale\\(lzo\\)", "lzo", coef_df$Term)
+    coef_df$Term <- gsub("scale\\(kzo\\)", "kzo", coef_df$Term)
+    
+    coef_df$Sig <- ifelse(coef_df$p < 0.001, "***", ifelse(coef_df$p < 0.01, "**", ifelse(coef_df$p < 0.05, "*", "")))
+    
+    datatable(coef_df[, c("Term", "Estimate", "SE", "z", "p", "Sig")], rownames = FALSE, options = list(pageLength = 12, scrollX = TRUE)) %>%
+      formatRound(c("Estimate", "SE", "z"), 3) %>%
+      formatRound("p", 4) %>%
+      formatStyle(columns = names(coef_df), color = "white", backgroundColor = "#2d2d2d") %>%
+      formatStyle("Sig", color = "#69ff69", fontWeight = "bold")
+  })
   
   # ===== TAB 7: LMM & KONTRASTE =====
   
@@ -803,7 +1007,7 @@ server <- function(input, output, session) {
     
     # Interaktionskontrast berechnen
     emm_int <- emmeans(model, ~ valence * ecology)
-    int_contrast <- contrast(emm_int, interaction = "pairwise")
+    int_contrast <- contrast(emm_int, list(`Cheater-Trust (Real) minus (Invert)` = c(-1, 1, 1, -1)))
     int_df <- as.data.frame(int_contrast)
     
     # Zusammenfügen
@@ -880,6 +1084,63 @@ server <- function(input, output, session) {
       formatStyle("Sig", color = "#69ff69", fontWeight = "bold") %>%
       formatStyle("Interpretation", color = "#ce9ffc")
   })
+
+  # ===== MODEL DIAGNOSTICS =====
+  output$diag_resid_fitted <- renderPlot({
+    req(study_data())
+    model <- lmm_model()
+    diag_data <- data.frame(
+      fitted = fitted(model),
+      resid = resid(model)
+    )
+    
+    ggplot(diag_data, aes(x = fitted, y = resid)) +
+      geom_point(alpha = 0.5, color = "#40E0D0") +
+      geom_hline(yintercept = 0, linetype = "dashed", color = "white") +
+      dark_theme() +
+      labs(x = "Fitted", y = "Residuals")
+  })
+  
+  output$diag_qq <- renderPlot({
+    req(study_data())
+    model <- lmm_model()
+    diag_data <- data.frame(resid = resid(model))
+    
+    ggplot(diag_data, aes(sample = resid)) +
+      stat_qq(color = "#DC143C") +
+      stat_qq_line(color = "white") +
+      dark_theme() +
+      labs(x = "Theoretical Quantiles", y = "Sample Quantiles")
+  })
+  
+  output$diag_scale_location <- renderPlot({
+    req(study_data())
+    model <- lmm_model()
+    diag_data <- data.frame(
+      fitted = fitted(model),
+      sqrt_resid = sqrt(abs(resid(model)))
+    )
+    
+    ggplot(diag_data, aes(x = fitted, y = sqrt_resid)) +
+      geom_point(alpha = 0.5, color = "#FF8C00") +
+      geom_smooth(method = "loess", se = FALSE, color = "white") +
+      dark_theme() +
+      labs(x = "Fitted", y = "Sqrt(|Residuals|)")
+  })
+  
+  output$diag_summary <- renderTable({
+    req(study_data())
+    model <- lmm_model()
+    singular <- isSingular(model, tol = 1e-4)
+    theta <- getME(model, "theta")
+    boundary <- any(theta < 1e-6)
+    data.frame(
+      Check = c("Singular fit", "Boundary fit (theta ~ 0)", "Optimizer"),
+      Value = c(ifelse(singular, "Ja", "Nein"),
+                ifelse(boundary, "Ja", "Nein"),
+                model@optinfo$optimizer)
+    )
+  })
   
   # ===== EXPORT =====
   
@@ -924,8 +1185,8 @@ server <- function(input, output, session) {
       if (length(input$export_plots) > 0) {
         
         plot_functions <- list(
-          interaction_bar = function() plot_interaction_bar(study_data()$long),
-          interaction_line = function() plot_interaction_line(study_data()$long),
+          interaction_bar = function() plot_interaction_bar(study_data()$long, input$error_type),
+          interaction_line = function() plot_interaction_line(study_data()$long, input$error_type),
           ss_grouped = function() plot_simple_slopes_grouped(study_data()$wide),
           ss_scatter = function() plot_simple_slopes_scatter(study_data()$long),
           ss_diff = function() plot_difference_by_lzo(study_data()$wide),
